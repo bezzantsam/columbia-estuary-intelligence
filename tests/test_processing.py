@@ -61,3 +61,34 @@ def test_misalignment_rejected(tmp_path):
     _make_tif(tmp_path / "udm.tif", udm, transform=from_origin(-124.2, 46.3, 0.0001, 0.0001))
     with pytest.raises(ValueError, match="grids differ"):
         extract_features(tmp_path / "sr.tif", tmp_path / "udm.tif")
+
+
+def test_saturated_pixel_excluded_even_with_external_mask(tmp_path):
+    sr = np.ones((4, 1, 2), dtype=np.uint16) * 1000
+    sr[1] = 2500
+    sr[2, 0, 1] = 65535
+    sr[3] = 500
+    udm = np.zeros((8, 1, 2), dtype=np.uint8)
+    udm[0] = 1
+    udm[6] = 95
+    _make_tif(tmp_path / "sr.tif", sr)
+    _make_tif(tmp_path / "udm.tif", udm)
+    _make_tif(tmp_path / "water.tif", np.ones((1, 1, 2), dtype=np.uint8))
+    r, _, _ = extract_features(
+        tmp_path / "sr.tif", tmp_path / "udm.tif",
+        water_mask_path=tmp_path / "water.tif", water_mask_mode="external")
+    assert r["water_pixel_count"] == 1
+
+
+def test_haze_flag_excluded_even_if_clear_also_set(tmp_path):
+    sr = np.ones((4, 1, 2), dtype=np.uint16) * 1000
+    sr[1] = 2500
+    sr[3] = 500
+    udm = np.zeros((8, 1, 2), dtype=np.uint8)
+    udm[0] = 1
+    udm[6] = 95
+    udm[3, 0, 1] = 1
+    _make_tif(tmp_path / "sr.tif", sr)
+    _make_tif(tmp_path / "udm.tif", udm)
+    r, _, _ = extract_features(tmp_path / "sr.tif", tmp_path / "udm.tif")
+    assert r["water_pixel_count"] == 1
