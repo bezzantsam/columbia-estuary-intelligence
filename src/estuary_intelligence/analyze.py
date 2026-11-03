@@ -11,6 +11,7 @@ import rasterio
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from .watermask import load_water_mask
 
 BANDS = {
     4: {"blue": 1, "green": 2, "red": 3, "nir": 4},
@@ -19,9 +20,15 @@ BANDS = {
 
 
 def extract_features(sr_path: str | Path, udm_path: str | Path | None = None,
-                     min_confidence: int = 70, ndwi_threshold: float = 0.0) -> tuple[dict, np.ndarray, np.ndarray]:
+                     min_confidence: int = 70, ndwi_threshold: float = 0.0,
+                     water_mask_path: str | Path | None = None,
+                     water_mask_mode: str = "ndwi") -> tuple[dict, np.ndarray, np.ndarray]:
     if not 0 <= min_confidence <= 100:
         raise ValueError("min_confidence must be between 0 and 100")
+    if water_mask_mode not in ("ndwi", "external", "external_and_ndwi"):
+        raise ValueError("water_mask_mode must be ndwi, external or external_and_ndwi")
+    if water_mask_mode != "ndwi" and water_mask_path is None:
+        raise ValueError("External water-mask mode requires water_mask_path")
     with rasterio.open(sr_path) as sr:
         if sr.count not in BANDS:
             raise ValueError(f"Expected 4-band or 8-band PlanetScope SR image; got {sr.count} bands")
@@ -50,7 +57,22 @@ def extract_features(sr_path: str | Path, udm_path: str | Path | None = None,
     ndwi = np.full(green.shape, np.nan, dtype="float32")
     idx = valid & (denominator > 1e-6)
     ndwi[idx] = (green[idx] - nir[idx]) / denominator[idx]
-    water = idx & (ndwi > ndwi_threshold)
+    ndwi_water = idx & (ndwi > ndwi_threshold)
+    if water_mask_mode == "ndwi":
+        water = ndwi_water
+        excluded_by_ndwi = 0
+    else:
+        independent_water = load_water_mask(
+            water_mask_path, shape=sr_shape, crs=sr_crs,
+            transform=sr_transform,
+        )
+        externally_designated = idx & independent_water
+        excluded_by_ndwi = int((externally_designated & ~ndwi_water).sum())
+        if water_mask_mode == "external":
+            water = externally_designated
+        else:
+            water = externally_designated & ndwi_water
+            excluded_by_ndwi = 0
     red_green_ratio = np.full(green.shape, np.nan, dtype="float32")
     red_green_ratio[water] = red[water] / np.maximum(green[water], 1e-6)
 
@@ -62,6 +84,8 @@ def extract_features(sr_path: str | Path, udm_path: str | Path | None = None,
         "band_count": int(band_count),
         "clear_valid_fraction": float(valid.sum() / valid.size),
         "water_pixel_count": int(water.sum()),
+        "water_mask_mode": water_mask_mode,
+        "water_pixels_that_ndwi_would_exclude": excluded_by_ndwi,
         "water_fraction_of_clear": (float(water.sum() / valid.sum()) if valid.any() else None),
         "median_ndwi_water": safe_median(ndwi, water),
         "median_red_reflectance_water": safe_median(red, water),
@@ -80,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--acquired", required=True, help="YYYY-MM-DD; source should be Planet metadata")
     p.add_argument("--min-confidence", type=int, default=70)
     p.add_argument("--ndwi-threshold", type=float, default=0.0)
+    p.add_argument("--water-mask", help="Optional independent binary 0/1 water mask GeoTIFF")
+    p.add_argument("--water-mask-mode", choices=("ndwi", "external", "external_and_ndwi"), default="ndwi")
     p.add_argument("--output-csv", default="outputs/scene_features.csv")
     p.add_argument("--output-png", default="outputs/scene_preview.png")
     p.add_argument("--output-provenance", default="outputs/scene_provenance.json")
@@ -89,7 +115,9 @@ def main(argv: list[str] | None = None) -> None:
     from datetime import date
     date.fromisoformat(args.acquired)
     result, ndwi, water = extract_features(args.surface_reflectance, args.udm2,
-                                           args.min_confidence, args.ndwi_threshold)
+                                           args.min_confidence, args.ndwi_threshold,
+                                           water_mask_path=args.water_mask,
+                                           water_mask_mode=args.water_mask_mode)
     result = {"scene_id": args.scene_id, "acquired": args.acquired, **result}
     dest = Path(args.output_csv)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +143,10 @@ def main(argv: list[str] | None = None) -> None:
         surface_reflectance=args.surface_reflectance, udm2=args.udm2,
         min_confidence=args.min_confidence, ndwi_threshold=args.ndwi_threshold,
         features=result,
+    )
+    provenance["processing"]["water_mask_mode"] = args.water_mask_mode
+    provenance["processing"]["external_water_mask_filename"] = (
+        Path(args.water_mask).name if args.water_mask else None
     )
     saved_provenance = save_provenance(provenance, args.output_provenance)
     imgdest = Path(args.output_png)
