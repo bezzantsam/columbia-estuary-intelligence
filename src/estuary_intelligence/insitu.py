@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 import requests
 
 NOAA_URL = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
@@ -36,7 +37,7 @@ def _number(value: Any) -> float | None:
     if value is None or str(value).strip() in ("", "-", "null", "NaN"):
         return None
     result = float(value)
-    if not (-float("inf") < result < float("inf")):
+    if not (-float("inf") < result < float("inf")) or result <= -999900:
         return None
     return result
 
@@ -112,15 +113,18 @@ def fetch_usgs(start: date, end: date, parameter: str = "63680",
     end_iso = datetime.combine(end, time.max, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {
         "monitoring_location_id": station, "parameter_code": parameter,
-        "datetime": f"{start_iso}/{end_iso}", "f": "json",
+        "time": f"{start_iso}/{end_iso}", "f": "json",
         "limit": page_size, "offset": 0,
     }
     key = os.environ.get("USGS_API_KEY")
     if key:
         params["api_key"] = key
     rows: list[dict] = []
+    next_url = USGS_URL
+    request_params = params
+    visited = set()
     for _ in range(max_pages):
-        payload = _request_json(USGS_URL, params, session)
+        payload = _request_json(next_url, request_params, session)
         features = payload.get("features")
         if not isinstance(features, list):
             raise ValueError("USGS response lacks GeoJSON features")
@@ -139,12 +143,22 @@ def fetch_usgs(start: date, end: date, parameter: str = "63680",
                 "quality": props.get("approval_status", props.get("approvals_status")),
                 "timeseries_id": props.get("time_series_id", props.get("timeseries_id")),
             })
-        has_next = any(link.get("rel") == "next" for link in payload.get("links", []))
-        if not has_next:
+        links = [link.get("href") for link in payload.get("links", [])
+                 if link.get("rel") == "next"]
+        if not links:
             return rows
         if not features:
             raise ValueError("USGS next page with zero features")
-        params["offset"] += len(features)
+        if not links[0]:
+            raise ValueError("USGS next-page link is missing href")
+        next_url = urljoin(USGS_URL, links[0])
+        parsed = urlsplit(next_url)
+        if parsed.scheme != "https" or parsed.hostname != "api.waterdata.usgs.gov" or parsed.port not in (None, 443):
+            raise ValueError("Unsafe USGS pagination URL")
+        if next_url in visited:
+            raise ValueError("USGS pagination loop detected")
+        visited.add(next_url)
+        request_params = None
     raise ValueError("USGS exceeded max_pages; narrow the time window")
 
 
