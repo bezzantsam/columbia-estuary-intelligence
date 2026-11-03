@@ -36,9 +36,13 @@ def extract_features(sr_path: str | Path, udm_path: str | Path | None = None,
         green = sr.read(bands["green"]).astype("float32") / 10000.0
         red = sr.read(bands["red"]).astype("float32") / 10000.0
         nir = sr.read(bands["nir"]).astype("float32") / 10000.0
-        valid = sr.read_masks(bands["red"]) > 0
+        valid = (sr.read_masks(bands["green"]) > 0)
+        valid &= sr.read_masks(bands["red"]) > 0
+        valid &= sr.read_masks(bands["nir"]) > 0
         valid &= np.isfinite(green) & np.isfinite(red) & np.isfinite(nir)
         valid &= (green > 0) & (red > 0) & (nir >= 0)
+        # Out-of-range/saturated DN values are not usable water reflectance.
+        valid &= (green <= 1.5) & (red <= 1.5) & (nir <= 1.5)
         sr_shape, sr_crs, sr_transform = sr.shape, sr.crs, sr.transform
         band_count = sr.count
 
@@ -49,9 +53,12 @@ def extract_features(sr_path: str | Path, udm_path: str | Path | None = None,
             if mask.shape != sr_shape or mask.crs != sr_crs or not mask.transform.almost_equals(sr_transform):
                 raise ValueError("UDM2 and surface-reflectance grids differ. Align/crop both with GIS tools first.")
             clear = mask.read(1) == 1
+            class_flags_ok = (mask.read(2) == 0) & (mask.read(3) == 0)
+            class_flags_ok &= (mask.read(4) == 0) & (mask.read(5) == 0)
+            class_flags_ok &= mask.read(6) == 0
             confidence = mask.read(7) >= min_confidence
             pixel_flags_ok = mask.read(8) == 0
-            valid &= clear & confidence & pixel_flags_ok
+            valid &= clear & class_flags_ok & confidence & pixel_flags_ok
 
     denominator = green + nir
     ndwi = np.full(green.shape, np.nan, dtype="float32")
