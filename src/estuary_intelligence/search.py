@@ -5,6 +5,7 @@ from datetime import date
 import json
 import os
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 import requests
 
 API_URL = "https://api.planet.com/data/v1/quick-search"
@@ -44,33 +45,71 @@ def build_query(aoi: dict, start: date, end: date, max_cloud: float = 0.25) -> d
     }
 
 
-def search_catalog(api_key: str, query: dict, limit: int = 50) -> dict:
+def search_catalog(api_key: str, query: dict, limit: int = 50,
+                   page_size: int = 50, max_pages: int = 100,
+                   session=None) -> dict:
+    """Return at most limit scene records, following Planet pagination.
+
+    limit is a total-output cap, not a per-page limit. Explicitly reports
+    truncation; rejects unsafe pagination URLs before forwarding credentials.
+    """
     if not api_key:
         raise ValueError("PL_API_KEY not set; wait for Planet account activation")
-    if not 1 <= limit <= 250:
-        raise ValueError("limit must be between 1 and 250")
-    response = requests.post(
+    if not 1 <= limit <= 10000:
+        raise ValueError("limit must be between 1 and 10000")
+    if not 1 <= page_size <= 250 or not 1 <= max_pages <= 100:
+        raise ValueError("page_size must be 1..250 and max_pages must be 1..100")
+    client = session if session is not None else requests
+    auth = (api_key, "")
+    response = client.post(
         API_URL,
-        params={"_page_size": limit, "_sort": "acquired desc"},
-        auth=(api_key, ""),
+        params={"_page_size": min(page_size, limit), "_sort": "acquired desc"},
+        auth=auth,
         headers={"Content-Type": "application/json"},
         json=query,
         timeout=60,
     )
     response.raise_for_status()
-    payload = response.json()
     features = []
-    for item in payload.get("features", []):
-        properties = item.get("properties", {})
-        features.append({
-            "id": item.get("id"),
-            "acquired": properties.get("acquired"),
-            "cloud_cover": properties.get("cloud_cover"),
-            "clear_percent": properties.get("clear_percent"),
-            "instrument": properties.get("instrument"),
-            "item_type": item.get("type"),
-        })
-    return {"catalog_only": True, "count": len(features), "scenes": features}
+    pages_fetched = 0
+    seen_links = set()
+    truncated = False
+    while True:
+        payload = response.json()
+        pages_fetched += 1
+        if not isinstance(payload, dict) or not isinstance(payload.get("features"), list):
+            raise ValueError("Unexpected Planet catalog response structure")
+        for item in payload["features"]:
+            properties = item.get("properties", {})
+            features.append({
+                "id": item.get("id"),
+                "acquired": properties.get("acquired"),
+                "cloud_cover": properties.get("cloud_cover"),
+                "clear_percent": properties.get("clear_percent"),
+                "instrument": properties.get("instrument"),
+                "item_type": item.get("type"),
+            })
+            if len(features) == limit:
+                break
+        raw_next = (payload.get("_links") or {}).get("_next")
+        if len(features) == limit:
+            truncated = bool(raw_next) or len(payload["features"]) > limit
+            break
+        if not raw_next:
+            break
+        if pages_fetched >= max_pages:
+            raise RuntimeError("Planet pagination exceeded max_pages; narrow the search")
+        next_url = urljoin(API_URL, raw_next)
+        u = urlsplit(next_url)
+        if u.scheme != "https" or u.hostname != "api.planet.com" or u.port not in (None, 443):
+            raise ValueError("Unsafe Planet pagination URL; credentials not forwarded")
+        if next_url in seen_links:
+            raise ValueError("Planet pagination loop detected")
+        seen_links.add(next_url)
+        response = client.get(next_url, auth=auth, timeout=60)
+        response.raise_for_status()
+    return {"catalog_only": True, "count": len(features), "pages_fetched": pages_fetched,
+            "truncated": truncated, "scenes": features}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -81,11 +120,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--aoi", default="config/aoi.geojson")
     parser.add_argument("--output", default="outputs/planet_catalog.json")
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--page-size", type=int, default=50)
     args = parser.parse_args(argv)
     api_key = os.environ.get("PL_API_KEY", "")
     if not api_key:
         parser.error("Planet account API key required in local PL_API_KEY environment variable")
-    out = search_catalog(api_key, build_query(load_aoi(args.aoi), args.start, args.end, args.max_cloud), args.limit)
+    out = search_catalog(api_key, build_query(load_aoi(args.aoi), args.start, args.end, args.max_cloud), args.limit, page_size=args.page_size)
     dest = Path(args.output)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(out, indent=2) + "\n")
