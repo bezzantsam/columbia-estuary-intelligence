@@ -1,0 +1,40 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Columbia River mouth preliminary pilot AOI",
+        "notice": "Exploratory bounding polygon; does not distinguish water from land. Refine before reporting scientific findings.",
+        "crs": "EPSG:4326"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -124.17,
+              46.175
+            ],
+            [
+              -123.91,
+              46.175
+            ],
+            [
+              -123.91,
+              46.345
+            ],
+            [
+              -124.17,
+              46.345
+            ],
+            [
+              -124.17,
+              46.175
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
