@@ -82,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--ndwi-threshold", type=float, default=0.0)
     p.add_argument("--output-csv", default="outputs/scene_features.csv")
     p.add_argument("--output-png", default="outputs/scene_preview.png")
+    p.add_argument("--output-provenance", default="outputs/scene_provenance.json")
     args = p.parse_args(argv)
     if not args.udm2:
         p.error("UDM2 is required for this version's operational workflow; no unmasked results")
@@ -108,11 +109,19 @@ def main(argv: list[str] | None = None) -> None:
     fig.colorbar(mappable, ax=ax, label="NDWI (unitless)")
     fig.text(0.5, 0.01, "Unvalidated optical proxy • noncommercial research • check Planet publication permission", ha="center", fontsize=8)
     fig.tight_layout(rect=[0, 0.04, 1, 1])
+    from estuary_intelligence.provenance import build_provenance, save_provenance
+    provenance = build_provenance(
+        scene_id=args.scene_id, acquired=args.acquired,
+        surface_reflectance=args.surface_reflectance, udm2=args.udm2,
+        min_confidence=args.min_confidence, ndwi_threshold=args.ndwi_threshold,
+        features=result,
+    )
+    saved_provenance = save_provenance(provenance, args.output_provenance)
     imgdest = Path(args.output_png)
     imgdest.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(imgdest, dpi=130)
     plt.close(fig)
-    print(f"Saved {dest} and {imgdest}. Water pixels: {result['water_pixel_count']}. NOT a calibrated sediment estimate.")
+    print(f"Saved {dest}, {imgdest} and {saved_provenance}. Water pixels: {result['water_pixel_count']}. NOT a calibrated sediment estimate.")
 
 
 if __name__ == "__main__":
