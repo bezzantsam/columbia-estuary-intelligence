@@ -22,7 +22,7 @@ class Session:
         self.requests = []
 
     def get(self, url, *, params, timeout):
-        self.requests.append((url, dict(params)))
+        self.requests.append((url, dict(params) if params else None))
         return Response(self.responses.pop(0))
 
 
@@ -56,7 +56,7 @@ def test_usgs_offset_paging_preserves_units_and_metadata():
             "unit_of_measure": "FNU", "approval_status": "Provisional",
             "time_series_id": "s1"}
     second = dict(item, time="2026-07-01T01:15:00+00:00", value=None)
-    s = Session({"features": [{"properties": item}], "links": [{"rel": "next"}]},
+    s = Session({"features": [{"properties": item}], "links": [{"rel": "next", "href": "https://api.waterdata.usgs.gov/ogcapi/v1/collections/continuous/items?offset=1"}]},
                 {"features": [{"properties": second}], "links": []})
     rows = fetch_usgs(date(2026, 7, 1), date(2026, 7, 1),
                       page_size=1, session=s)
@@ -64,7 +64,9 @@ def test_usgs_offset_paging_preserves_units_and_metadata():
     assert rows[0]["value"] == 3.5 and rows[1]["value"] is None
     assert rows[0]["timeseries_id"] == "s1"
     assert rows[0]["units"] == "FNU"
-    assert s.requests[1][1]["offset"] == 1
+    assert s.requests[1][0].endswith("offset=1")
+    assert s.requests[1][1] is None
+    assert "time" in s.requests[0][1] and "datetime" not in s.requests[0][1]
 
 
 def test_usgs_rejects_incorrect_station():
@@ -87,3 +89,22 @@ def test_save_json_preserves_missing_values(tmp_path):
     p = save_json_csv([{"timestamp_utc": "2026-07-01T00:00:00+00:00",
                         "value": None}], tmp_path / "observations.json")
     assert json.loads(p.read_text())[0]["value"] is None
+
+
+def test_usgs_sentinel_is_missing():
+    item = {"monitoring_location_id": "USGS-14246900", "parameter_code": "63680",
+            "time": "2026-07-01T00:00:00Z", "value": "-999999",
+            "unit_of_measure": "FNU"}
+    s = Session({"features": [{"properties": item}], "links": []})
+    rows = fetch_usgs(date(2026, 7, 1), date(2026, 7, 1), session=s)
+    assert rows[0]["value"] is None
+
+
+def test_usgs_does_not_follow_untrusted_next_url():
+    item = {"monitoring_location_id": "USGS-14246900", "parameter_code": "63680",
+            "time": "2026-07-01T00:00:00Z", "value": "3",
+            "unit_of_measure": "FNU"}
+    s = Session({"features": [{"properties": item}],
+                 "links": [{"rel": "next", "href": "https://example.org/collect"}]})
+    with pytest.raises(ValueError, match="Unsafe USGS"):
+        fetch_usgs(date(2026, 7, 1), date(2026, 7, 1), session=s)
