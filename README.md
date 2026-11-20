@@ -1,6 +1,6 @@
 # Columbia Estuary Intelligence (CEI)
 
-**Status: research prototype / no Planet imagery downloaded yet.**
+**Status: research prototype; ASU Planet access approved November 11, 2026. Account entitlements and the first real Planet scene remain to be verified.**
 
 A noncommercial research portfolio project initiated by an ASU online Engineering Management graduate student. It studies satellite-observable spatial and temporal changes in the Columbia River estuary and surrounding coastal waters, and asks whether those changes covary with river discharge, tides, and wind.
 
@@ -8,7 +8,7 @@ A noncommercial research portfolio project initiated by an ASU online Engineerin
 
 ## Project milestone 0 — prepared
 - Defined a pilot area of interest (AOI) spanning the Columbia River mouth (see `config/aoi.geojson`). **Preliminary bounding polygon**: refine with a coastline/water polygon prior to results.
-- Added a secure PlanetScope catalog search; no imagery orders or quota charges are made.
+- Added a PlanetScope catalog search; it does not activate assets, place orders, or download imagery.
 - Added a local, quality-masked optical image feature extractor for PlanetScope surface-reflectance GeoTIFFs and UDM2 imagery.
 - Defined reproducibility, validation, and licensed-data handling rules.
 - Added synthetic-fixture unit tests to establish that the basic mechanics work.
@@ -23,7 +23,19 @@ python -m pip install -e .
 python -m pytest -q
 ```
 
-### 1. Catalog search (after Planet invitation arrives)
+### 1. Start the bounded pilot
+
+See [the pilot runbook](docs/PILOT_RUNBOOK.md) for account verification, a hidden local credential prompt, and the first-scene workflow. See [current project status](docs/PILOT_STATUS.md) for what has and has not been verified.
+
+First write the plan without credentials or network calls:
+
+```bash
+python -m estuary_intelligence.pilot --start 2026-07-01 --end 2026-08-01 --limit 10 --dry-run --output outputs/planet_pilot_plan.json
+```
+
+Once the ASU account and local `PL_API_KEY` are ready, omit `--dry-run` to inspect up to ten catalog scenes and their asset permissions. The manifest distinguishes catalog visibility, download permission, and whether assets are active. It does not activate, order, or download imagery, and it does not infer plan expiry, quota, price, or scientific validity.
+
+### 2. Catalog search only
 
 Set the API key **locally** (never in this repository or chat):
 
@@ -34,19 +46,21 @@ python -m estuary_intelligence.search --start 2026-07-01 --end 2026-08-01 --max-
 
 If your access only supports the Planet web interface, browse/download there and skip automated search. This project does not assume API entitlements until verified.
 
-### 2. Analyze a downloaded PlanetScope surface-reflectance scene
+### 3. Analyze a downloaded PlanetScope surface-reflectance scene
 
-Request **surface reflectance** (4-band or 8-band) and its aligned **UDM2** quality mask. For large scenes, clip at the ordering stage or preprocess consistently using GIS software. Never commit licensed raw imagery.
+Request **surface reflectance** (4-band or 8-band) and its aligned **UDM2** quality mask. Clip every scene and mask to the same fixed study area before comparing dates: catalog intersection alone does not ensure equal coverage. The extractor currently operates over the full input raster. Never commit licensed raw imagery. Use individual scene assets, not the distinct Analysis-Ready PlanetScope product, which Planet identifies as unsuitable for open-water studies.
+
+Replace both shell variables below with the exact scene ID and full acquisition timestamp from Planet metadata. The timestamp must include a timezone; a date alone cannot be matched to tides.
 
 ```bash
 python -m estuary_intelligence.analyze \
     --surface-reflectance data/raw/SCENE_AnalyticMS_SR_8b.tif \
     --udm2 data/raw/SCENE_udm2.tif \
-    --scene-id YOUR_SCENE_ID \
-    --acquired 2026-07-18 \
-    --output-csv outputs/scene_features.csv \
-    --output-png outputs/scene_preview.png
+    --scene-id "$SCENE_ID" \
+    --acquired "$ACQUIRED_TIMESTAMP"
 ```
+
+By default, each scene's CSV, preview and provenance go in its own `outputs/<scene-id>/` directory. Existing destination files are rejected instead of overwritten. Explicit output paths remain available for a new processing version.
 
 The initial workflow records: eligible clear-pixel fraction, approximate water-pixel fraction (NDWI), median green and red surface reflectance over the detected water mask, and red/green reflectance ratio. They are exploratory features, **not calibrated sediment concentration**. The PNG is an optical-feature visualization, not proof of sediment extent.
 

@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
+import re
 import numpy as np
 import rasterio
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from .watermask import load_water_mask
+from .provenance import acquisition_timestamp_utc, build_provenance, save_provenance
 
 BANDS = {
     4: {"blue": 1, "green": 2, "red": 3, "nir": 4},
@@ -108,58 +110,70 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--surface-reflectance", required=True)
     p.add_argument("--udm2", help="Strongly recommended UDM2 quality mask")
     p.add_argument("--scene-id", required=True)
-    p.add_argument("--acquired", required=True, help="YYYY-MM-DD; source should be Planet metadata")
+    p.add_argument("--acquired", required=True,
+                   help="Full timezone-aware acquired timestamp from Planet metadata, e.g. 2026-07-18T18:42:13Z")
     p.add_argument("--min-confidence", type=int, default=70)
     p.add_argument("--ndwi-threshold", type=float, default=0.0)
     p.add_argument("--water-mask", help="Optional independent binary 0/1 water mask GeoTIFF")
     p.add_argument("--water-mask-mode", choices=("ndwi", "external", "external_and_ndwi"), default="ndwi")
-    p.add_argument("--output-csv", default="outputs/scene_features.csv")
-    p.add_argument("--output-png", default="outputs/scene_preview.png")
-    p.add_argument("--output-provenance", default="outputs/scene_provenance.json")
+    p.add_argument("--output-csv", help="New CSV path; default outputs/<scene-id>/scene_features.csv")
+    p.add_argument("--output-png", help="New PNG path; default outputs/<scene-id>/scene_preview.png")
+    p.add_argument("--output-provenance", help="New JSON path; default outputs/<scene-id>/scene_provenance.json")
     args = p.parse_args(argv)
     if not args.udm2:
         p.error("UDM2 is required for this version's operational workflow; no unmasked results")
-    from datetime import date
-    date.fromisoformat(args.acquired)
+    try:
+        acquired_utc = acquisition_timestamp_utc(args.acquired)
+    except ValueError as exc:
+        p.error(str(exc))
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", args.scene_id):
+        p.error("Scene ID must be 1–128 letters, digits, underscores or hyphens, starting with a letter or digit")
+    output_dir = Path("outputs") / args.scene_id
+    dest = Path(args.output_csv) if args.output_csv else output_dir / "scene_features.csv"
+    imgdest = Path(args.output_png) if args.output_png else output_dir / "scene_preview.png"
+    provdest = Path(args.output_provenance) if args.output_provenance else output_dir / "scene_provenance.json"
+    destinations = (dest, imgdest, provdest)
+    if len({path.resolve() for path in destinations}) != len(destinations):
+        p.error("CSV, PNG and provenance destinations must be different files")
+    for path in destinations:
+        if path.exists() or path.is_symlink():
+            p.error(f"Output already exists: {path}. Choose new output paths to preserve the previous analysis.")
     result, ndwi, water = extract_features(args.surface_reflectance, args.udm2,
                                            args.min_confidence, args.ndwi_threshold,
                                            water_mask_path=args.water_mask,
                                            water_mask_mode=args.water_mask_mode)
-    result = {"scene_id": args.scene_id, "acquired": args.acquired, **result}
-    dest = Path(args.output_csv)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    existing = dest.exists()
-    with dest.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(result))
-        if not existing:
-            writer.writeheader()
-        writer.writerow(result)
+    result = {"scene_id": args.scene_id, "acquired": acquired_utc,
+              "acquired_date": acquired_utc[:10], **result}
+    provenance = build_provenance(
+        scene_id=args.scene_id, acquired=acquired_utc,
+        surface_reflectance=args.surface_reflectance, udm2=args.udm2,
+        min_confidence=args.min_confidence, ndwi_threshold=args.ndwi_threshold,
+        features=result, water_mask_path=args.water_mask,
+        water_mask_mode=args.water_mask_mode,
+    )
     fig, ax = plt.subplots(figsize=(9, 6))
     display = np.ma.masked_invalid(ndwi)
     mappable = ax.imshow(display, cmap="BrBG", vmin=-0.5, vmax=0.5)
     ax.contour(water.astype("int"), levels=[0.5], colors="black", linewidths=0.3)
-    ax.set_title(f"Exploratory NDWI | {args.scene_id} | {args.acquired}")
+    ax.set_title(f"Exploratory NDWI | {args.scene_id} | {acquired_utc}")
     ax.set_xlabel("Image column (not latitude/longitude)")
     ax.set_ylabel("Image row (not latitude/longitude)")
     fig.colorbar(mappable, ax=ax, label="NDWI (unitless)")
     fig.text(0.5, 0.01, "Unvalidated optical proxy • noncommercial research • check Planet publication permission", ha="center", fontsize=8)
     fig.tight_layout(rect=[0, 0.04, 1, 1])
-    from estuary_intelligence.provenance import build_provenance, save_provenance
-    provenance = build_provenance(
-        scene_id=args.scene_id, acquired=args.acquired,
-        surface_reflectance=args.surface_reflectance, udm2=args.udm2,
-        min_confidence=args.min_confidence, ndwi_threshold=args.ndwi_threshold,
-        features=result,
-    )
-    provenance["processing"]["water_mask_mode"] = args.water_mask_mode
-    provenance["processing"]["external_water_mask_filename"] = (
-        Path(args.water_mask).name if args.water_mask else None
-    )
-    saved_provenance = save_provenance(provenance, args.output_provenance)
-    imgdest = Path(args.output_png)
-    imgdest.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(imgdest, dpi=130)
-    plt.close(fig)
+    try:
+        for path in destinations:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation also rejects a destination created after preflight.
+        with imgdest.open("xb") as f:
+            fig.savefig(f, format="png", dpi=130)
+        saved_provenance = save_provenance(provenance, provdest, overwrite=False)
+        with dest.open("x", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(result))
+            writer.writeheader()
+            writer.writerow(result)
+    finally:
+        plt.close(fig)
     print(f"Saved {dest}, {imgdest} and {saved_provenance}. Water pixels: {result['water_pixel_count']}. NOT a calibrated sediment estimate.")
 
 

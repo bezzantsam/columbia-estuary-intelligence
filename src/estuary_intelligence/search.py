@@ -68,7 +68,10 @@ def search_catalog(api_key: str, query: dict, limit: int = 50,
         headers={"Content-Type": "application/json"},
         json=query,
         timeout=60,
+        allow_redirects=False,
     )
+    if 300 <= getattr(response, "status_code", 200) < 400:
+        raise ValueError("Unexpected Planet redirect; credentials not forwarded")
     response.raise_for_status()
     features = []
     pages_fetched = 0
@@ -79,7 +82,11 @@ def search_catalog(api_key: str, query: dict, limit: int = 50,
         pages_fetched += 1
         if not isinstance(payload, dict) or not isinstance(payload.get("features"), list):
             raise ValueError("Unexpected Planet catalog response structure")
+        consumed = 0
         for item in payload["features"]:
+            consumed += 1
+            if not isinstance(item, dict) or not isinstance(item.get("properties", {}), dict):
+                raise ValueError("Unexpected Planet scene metadata structure")
             properties = item.get("properties", {})
             features.append({
                 "id": item.get("id"),
@@ -87,13 +94,16 @@ def search_catalog(api_key: str, query: dict, limit: int = 50,
                 "cloud_cover": properties.get("cloud_cover"),
                 "clear_percent": properties.get("clear_percent"),
                 "instrument": properties.get("instrument"),
-                "item_type": item.get("type"),
+                # GeoJSON's top-level type is "Feature", not the Planet item type.
+                "item_type": properties.get("item_type"),
+                "geometry": item.get("geometry"),
+                "quality_category": properties.get("quality_category"),
             })
             if len(features) == limit:
                 break
         raw_next = (payload.get("_links") or {}).get("_next")
         if len(features) == limit:
-            truncated = bool(raw_next) or len(payload["features"]) > limit
+            truncated = bool(raw_next) or consumed < len(payload["features"])
             break
         if not raw_next:
             break
@@ -101,12 +111,16 @@ def search_catalog(api_key: str, query: dict, limit: int = 50,
             raise RuntimeError("Planet pagination exceeded max_pages; narrow the search")
         next_url = urljoin(API_URL, raw_next)
         u = urlsplit(next_url)
-        if u.scheme != "https" or u.hostname != "api.planet.com" or u.port not in (None, 443):
+        if (u.scheme != "https" or u.hostname != "api.planet.com"
+                or u.port not in (None, 443) or u.username or u.password
+                or not u.path.startswith("/data/v1/")):
             raise ValueError("Unsafe Planet pagination URL; credentials not forwarded")
         if next_url in seen_links:
             raise ValueError("Planet pagination loop detected")
         seen_links.add(next_url)
-        response = client.get(next_url, auth=auth, timeout=60)
+        response = client.get(next_url, auth=auth, timeout=60, allow_redirects=False)
+        if 300 <= getattr(response, "status_code", 200) < 400:
+            raise ValueError("Unexpected Planet redirect; credentials not forwarded")
         response.raise_for_status()
     return {"catalog_only": True, "count": len(features), "pages_fetched": pages_fetched,
             "truncated": truncated, "scenes": features}
